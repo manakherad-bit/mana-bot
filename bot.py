@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 TOKEN = "9057310870:AAFfuH_q1F7wFmNN4_jumMup2DEB0rp2-lY"
 SHEET_NAME = "Mana_Database"
 
+# تنظیمات نام کاربری و رمز عبور ربات
+BOT_USERNAME = "ربات مانا خرد"
+BOT_PASSWORD = "Mana@112233tc"
+
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 def get_gsheet_client():
@@ -88,8 +92,22 @@ def webhook():
         logger.error(f"خطا در پردازش وب‌هوک: {e}")
         return "Error", 500
 
-# --- منوی اصلی ربات ---
+# --- شروع و بررسی احراز هویت ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # بررسی اینکه آیا کاربر قبلاً لاگین کرده است یا خیر
+    if not context.user_data.get('authenticated', False):
+        context.user_data['state'] = 'WAITING_FOR_USERNAME'
+        text = f"🔐 به **{BOT_USERNAME}** خوش آمدید.\nلطفاً **نام کاربری** خود را وارد کنید:"
+        if update.callback_query:
+            await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+            await update.callback_query.answer()
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        return
+
+    await show_main_menu(update, context)
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton("✏️🗑️ ویرایش/حذف محصول", callback_data="menu_edit_del_product"),
@@ -112,7 +130,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_text = (
         "سلام مدیر عزیز! 🌟\n"
-        "به پنل مدیریت هوشمند شرکت بازرگانی **مانا** خوش آمدید.\n\n"
+        f"به پنل مدیریت هوشمند **{BOT_USERNAME}** خوش آمدید.\n\n"
         "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
     )
     
@@ -123,6 +141,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # اگر کاربر لاگین نکرده باشد، اجازه دسترسی به دکمه‌ها داده نمی‌شود
+    if not context.user_data.get('authenticated', False):
+        await update.callback_query.answer("لطفاً ابتدا با دستور /start وارد شوید.", show_alert=True)
+        return
+
     query = update.callback_query
     data = query.data
     await query.answer()
@@ -195,7 +218,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"📭 هیچ موردی در بخش {target_name} ثبت نشده است.")
                 return
             
-            # ذخیره رکوردها در context برای استفاده در مرحله بعد
             context.user_data['cached_records'] = records
             context.user_data['target_ws'] = target_ws
             
@@ -218,6 +240,32 @@ async def show_back_menu(message):
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     text = update.message.text
+    
+    # کنترل مراحل ورود نام کاربری و رمز عبور
+    if state == 'WAITING_FOR_USERNAME':
+        if text.strip() == BOT_USERNAME:
+            context.user_data['state'] = 'WAITING_FOR_PASSWORD'
+            await update.message.reply_text("✅ نام کاربری تایید شد.\nاکنون لطفاً **رمز عبور** خود را وارد کنید:")
+        else:
+            await update.message.reply_text("❌ نام کاربری اشتباه است. لطفاً دوباره تلاش کنید یا /start را بفرستید.")
+        return
+
+    if state == 'WAITING_FOR_PASSWORD':
+        if text.strip() == BOT_PASSWORD:
+            context.user_data['authenticated'] = True
+            context.user_data['state'] = None
+            await update.message.reply_text("✅ احراز هویت با موفقیت انجام شد!")
+            await show_main_menu(update, context)
+        else:
+            await update.message.reply_text("❌ رمز عبور اشتباه است. لطفاً دوباره تلاش کنید یا /start را بفرستید.")
+            context.user_data['state'] = 'WAITING_FOR_USERNAME'
+        return
+
+    # بررسی احراز هویت برای بقیه بخش‌ها
+    if not context.user_data.get('authenticated', False):
+        await update.message.reply_text("⛔ لطفاً ابتدا با دستور /start و ورود نام کاربری و رمز عبور وارد شوید.")
+        return
+
     if not state:
         await update.message.reply_text("لطفاً ابتدا از دستور /start برای ورود به منو استفاده کنید.")
         return
@@ -228,7 +276,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # مدیریت دستورات به شکل "حذف شماره" یا "ویرایش شماره"
         if state == 'WAITING_FOR_INDEX_ACTION':
             parts = text.split()
             if len(parts) < 2:
@@ -252,8 +299,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selected_record = records[idx]
             keys = list(selected_record.keys())
             rec_id = selected_record.get(keys[0])
-            
-            # ردیف در گوگل شیت (توجه: ردیف 1 هدر است، پس ایندکس لیست + 2 می‌شود)
             sheet_row_idx = idx + 2
             
             if "حذف" in action_word:
@@ -287,7 +332,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
             return
 
-        # تفکیک خط‌به‌خط ورودی‌های کاربر
         lines = [line.strip() for line in text.split("\n") if line.strip()]
 
         if state == 'WAITING_FOR_PRODUCT_DATA':
@@ -320,7 +364,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ حمل جدید با موفقیت ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
             context.user_data['state'] = None
 
-        # حالت ثبت تغییرات ویرایش شده
         elif state in ['WAITING_FOR_EDIT_PRODUCT_DATA', 'WAITING_FOR_EDIT_CUSTOMER_DATA', 'WAITING_FOR_EDIT_LOGISTICS_DATA']:
             target_ws = context.user_data.get('edit_sheet')
             row_idx = context.user_data.get('edit_row')
