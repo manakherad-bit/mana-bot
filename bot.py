@@ -88,7 +88,7 @@ def webhook():
         logger.error(f"خطا در پردازش وب‌هوک: {e}")
         return "Error", 500
 
-# --- منوی اصلی ربات با جابجایی ستون‌ها (ویرایش/حذف در راست، ثبت در چپ) ---
+# --- منوی اصلی ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -140,8 +140,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "شماره بچ (Batch)\n"
             "تاریخ انقضا\n"
             "موجودی\n"
-            "لینک COA\n\n"
-            "*(مثال: استون\nBATCH123\n2027/05\n1000\nhttp://...)*",
+            "لینک COA",
             parse_mode="Markdown"
         )
     elif data == "menu_add_customer":
@@ -152,8 +151,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "شخص رابط\n"
             "تلفن\n"
             "علاقه‌مندی‌ها\n"
-            "وضعیت\n\n"
-            "*(مثال:\nپتروآریا\nآقای رضایی\n09123456789\nخرید استون\nفعال)*",
+            "وضعیت",
             parse_mode="Markdown"
         )
     elif data == "menu_add_logistics":
@@ -197,18 +195,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"📭 هیچ موردی در بخش {target_name} ثبت نشده است.")
                 return
             
-            msg = f"✏️🗑️ **لیست {target_name} برای ویرایش یا حذف:**\nلطفاً شناسه مورد نظر را کپی کرده یا یادداشت کنید:\n\n"
-            for i, r in enumerate(records[-10:], 1):
-                # پیدا کردن اولین کلید به عنوان شناسه
-                keys = list(r.keys())
-                rec_id = r.get(keys[0], f"Row-{i}")
-                name_val = r.get(keys[1], "")
-                msg += f"{i}. شناسه: `{rec_id}` | عنوان: {name_val}\n"
-                
-            msg += "\nلطفاً **شناسه** رکورد مورد نظر به همراه عملیات (حذف یا ویرایش) را به شکل زیر بفرستید:\n\n"
-            msg += "`شناسه | حذف` (برای حذف)\nیا\n`شناسه | ویرایش` (برای ویرایش)"
+            # ذخیره رکوردها در context برای استفاده در مرحله بعد
+            context.user_data['cached_records'] = records
+            context.user_data['target_ws'] = target_ws
             
-            context.user_data['state'] = f'WAITING_FOR_ACTION_SELECTION_{target_ws}'
+            msg = f"✏️🗑️ **لیست {target_name}:**\nبرای حذف یا ویرایش، دستور خود را به یکی از شکل‌های زیر بفرستید:\n(مثال: `حذف 2` یا `ویرایش 1`)\n\n"
+            
+            for i, r in enumerate(records, 1):
+                keys = list(r.keys())
+                main_val = r.get(keys[1], "بدون عنوان") if len(keys) > 1 else "بدون عنوان"
+                msg += f"{i}. {main_val} (شناسه: `{r.get(keys[0])}`)\n"
+                
+            context.user_data['state'] = 'WAITING_FOR_INDEX_ACTION'
             await query.message.reply_text(msg, parse_mode="Markdown")
         except Exception as e:
             await query.message.reply_text(f"❌ خطا در دریافت اطلاعات: {e}")
@@ -230,51 +228,61 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # مدیریت حالت انتخاب ویرایش یا حذف
-        if state.startswith('WAITING_FOR_ACTION_SELECTION_'):
-            target_ws = state.replace('WAITING_FOR_ACTION_SELECTION_', '')
-            parts = [p.strip() for p in text.split("|")]
+        # مدیریت دستورات به شکل "حذف شماره" یا "ویرایش شماره"
+        if state == 'WAITING_FOR_INDEX_ACTION':
+            parts = text.split()
             if len(parts) < 2:
-                await update.message.reply_text("❌ فرمت اشتباه است. لطفاً به صورت `شناسه | حذف` یا `شناسه | ویرایش` ارسال کنید.", parse_mode="Markdown")
+                await update.message.reply_text("❌ فرمت اشتباه است. لطفاً به صورت `حذف 2` یا `ویرایش 1` ارسال کنید.", parse_mode="Markdown")
                 return
             
-            rec_id = parts[0]
-            action = parts[1]
-            
-            sheet = client.open(SHEET_NAME).worksheet(target_ws)
-            cell = sheet.find(rec_id)
-            if not cell:
-                await update.message.reply_text(f"❌ رکوردی با شناسه `{rec_id}` یافت نشد.", parse_mode="Markdown")
-                context.user_data['state'] = None
+            action_word = parts[0]
+            try:
+                idx = int(parts[1]) - 1
+            except ValueError:
+                await update.message.reply_text("❌ شماره ردیف وارد شده معتبر نیست.")
                 return
                 
-            row_idx = cell.row
+            records = context.user_data.get('cached_records', [])
+            target_ws = context.user_data.get('target_ws')
             
-            if "حذف" in action:
-                sheet.delete_rows(row_idx)
-                await update.message.reply_text(f"✅ رکورد با شناسه `{rec_id}` با موفقیت حذف شد.", parse_mode="Markdown")
+            if idx < 0 or idx >= len(records):
+                await update.message.reply_text("❌ شماره ردیف وارد شده در لیست وجود ندارد.")
+                return
+                
+            selected_record = records[idx]
+            keys = list(selected_record.keys())
+            rec_id = selected_record.get(keys[0])
+            
+            # ردیف در گوگل شیت (توجه: ردیف 1 هدر است، پس ایندکس لیست + 2 می‌شود)
+            sheet_row_idx = idx + 2
+            
+            if "حذف" in action_word:
+                sheet = client.open(SHEET_NAME).worksheet(target_ws)
+                sheet.delete_rows(sheet_row_idx)
+                await update.message.reply_text(f"✅ ردیف شماره {idx + 1} با موفقیت حذف شد.", parse_mode="Markdown")
                 context.user_data['state'] = None
-            elif "ویرایش" in action:
+                
+            elif "ویرایش" in action_word:
                 context.user_data['edit_sheet'] = target_ws
-                context.user_data['edit_row'] = row_idx
+                context.user_data['edit_row'] = sheet_row_idx
                 context.user_data['edit_id'] = rec_id
                 
                 if target_ws == "Products":
                     context.user_data['state'] = 'WAITING_FOR_EDIT_PRODUCT_DATA'
                     await update.message.reply_text(
-                        f"📦 در حال ویرایش محصول `{rec_id}`.\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
+                        f"📦 در حال ویرایش ردیف {idx + 1} (محصول `{rec_id}`).\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
                         "نام محصول\nشماره بچ\nتاریخ انقضا\nموجودی\nلینک COA", parse_mode="Markdown"
                     )
                 elif target_ws == "Customers":
                     context.user_data['state'] = 'WAITING_FOR_EDIT_CUSTOMER_DATA'
                     await update.message.reply_text(
-                        f"📝 در حال ویرایش مشتری `{rec_id}`.\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
+                        f"📝 در حال ویرایش ردیف {idx + 1} (مشتری `{rec_id}`).\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
                         "نام شرکت\nشخص رابط\nتلفن\nعلاقه‌مندی‌ها\nوضعیت", parse_mode="Markdown"
                     )
                 elif target_ws == "Logistics":
                     context.user_data['state'] = 'WAITING_FOR_EDIT_LOGISTICS_DATA'
                     await update.message.reply_text(
-                        f"🚚 در حال ویرایش لجستیک `{rec_id}`.\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
+                        f"🚚 در حال ویرایش ردیف {idx + 1} (لجستیک `{rec_id}`).\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
                         "مشتری\nمحصول\nتاریخ بارگیری\nتاریخ تخلیه\nپلاک کامیون\nتلفن راننده", parse_mode="Markdown"
                     )
             return
@@ -312,7 +320,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ حمل جدید با موفقیت ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
             context.user_data['state'] = None
 
-        # حالت جایگزینی اطلاعات ویرایش شده
+        # حالت ثبت تغییرات ویرایش شده
         elif state in ['WAITING_FOR_EDIT_PRODUCT_DATA', 'WAITING_FOR_EDIT_CUSTOMER_DATA', 'WAITING_FOR_EDIT_LOGISTICS_DATA']:
             target_ws = context.user_data.get('edit_sheet')
             row_idx = context.user_data.get('edit_row')
@@ -326,9 +334,8 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sheet = client.open(SHEET_NAME).worksheet(target_ws)
             new_row_data = [rec_id] + lines
             
-            # جایگزینی سلول‌های ردیف مربوطه
             sheet.update(f"A{row_idx}:F{row_idx}" if expected_count == 5 else f"A{row_idx}:G{row_idx}", [new_row_data])
-            await update.message.reply_text(f"✅ اطلاعات رکورد `{rec_id}` با موفقیت ویرایش و به‌روزرسانی شد!", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ اطلاعات ردیف با موفقیت ویرایش و به‌روزرسانی شد!", parse_mode="Markdown")
             context.user_data['state'] = None
             
     except Exception as e:
