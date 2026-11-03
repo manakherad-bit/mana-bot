@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import threading
 import asyncio
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,8 +44,29 @@ def get_gsheet_client():
 
 web_app = Flask(__name__)
 
-# راه‌اندازی اپلیکیشن تلگرام به صورت گلوبال
+# راه‌اندازی اپلیکیشن تلگرام
 application = ApplicationBuilder().token(TOKEN).build()
+
+# یک متغیر برای نگهداری لوپ ناهمگام اصلی تلگرام
+telegram_loop = None
+
+def run_telegram_background_loop():
+    global telegram_loop
+    telegram_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(telegram_loop)
+    
+    async def init_bot():
+        await application.initialize()
+        await application.start()
+        logger.info("Telegram application initialized and started successfully.")
+
+    telegram_loop.run_until_complete(init_bot())
+    
+    # نگه داشتن لوپ برای دریافت آپدیت‌ها
+    try:
+        telegram_loop.run_forever()
+    except Exception as e:
+        logger.error(f"Telegram loop error: {e}")
 
 @web_app.route('/')
 def home():
@@ -52,20 +74,20 @@ def home():
     status = "Connected to Google Sheets successfully!" if client else "Failed to connect to Google Sheets!"
     return f"Mana Bot Webhook is running! | DB Status: {status}"
 
-# نقطه دریافت آپدیت‌ها از تلگرام (Webhook Endpoint) با اصلاح مقداردهی اولیه
+# نقطه دریافت آپدیت‌ها از تلگرام (Webhook Endpoint)
 @web_app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
     try:
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        async def process():
-            # اصلاح کلیدی: بررسی و مقداردهی اولیه اپلیکیشن پیش از پردازش آپدیت
-            if not application.initialized:
-                await application.initialize()
-            await application.process_update(update)
-
-        asyncio.run(process())
+        if telegram_loop and telegram_loop.is_running():
+            # ارسال آپدیت به حلقه اصلی تلگرام
+            asyncio.run_coroutine_threadsafe(application.process_update(update), telegram_loop)
+        else:
+            logger.error("Telegram event loop is not running!")
+            return "Error", 500
+            
         return "OK", 200
     except Exception as e:
         logger.error(f"Error processing webhook update: {e}")
@@ -213,12 +235,19 @@ application.add_handler(CallbackQueryHandler(button_handler, pattern="^menu_"))
 application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_input))
 
 if __name__ == '__main__':
+    # راه‌اندازی لوپ تلگرام در یک ترد جداگانه به طوری که با فلاس تداخل نداشته باشد
+    t = threading.Thread(target=run_telegram_background_loop, daemon=True)
+    t.start()
+
     import requests
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{TOKEN}"
         set_url = f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={webhook_url}"
-        requests.get(set_url)
-        logger.info(f"Webhook set to: {webhook_url}")
+        try:
+            requests.get(set_url)
+            logger.info(f"Webhook set successfully to: {webhook_url}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
 
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
