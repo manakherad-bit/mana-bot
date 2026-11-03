@@ -2,8 +2,15 @@ import os
 import logging
 import json
 from flask import Flask
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 import threading
 import gspread
 from google.oauth2.service_account import Credentials
@@ -46,18 +53,112 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
-# --- دستورات مدیریت مشتریان (Customers) ---
-
-async def add_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فرمت دستور: /add_customer Company | Contact | Phone | Preferences | Status
-    text = " ".join(context.args)
-    if not text:
-        await update.message.reply_text("❌ لطفاً اطلاعات را به این شکل وارد کنید:\n`/add_customer نام شرکت | شخص رابط | تلفن | علاقه‌مندی‌ها | وضعیت`", parse_mode="Markdown")
-        return
+# --- منوی اصلی ربات ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("➕ ثبت مشتری جدید", callback_data="menu_add_customer"),
+         InlineKeyboardButton("➕ ثبت محصول جدید", callback_data="menu_add_product")],
+        [InlineKeyboardButton("➕ ثبت حمل و نقل", callback_data="menu_add_logistics"),
+         InlineKeyboardButton("✏️🗑️ ویرایش/حذف مشتری", callback_data="menu_edit_del_customer")],
+        [InlineKeyboardButton("✏️🗑️ ویرایش/حذف محصول", callback_data="menu_edit_del_product"),
+         InlineKeyboardButton("✏️🗑️ ویرایش/حذف لجستیک", callback_data="menu_edit_del_logistics")],
+        [InlineKeyboardButton("📋 نمایش مشتریان ثبت شده", callback_data="menu_list_customers"),
+         InlineKeyboardButton("📊 جدول پیگیری‌ها", callback_data="menu_followups")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    parts = [p.strip() for p in text.split("|")]
-    if len(parts) < 5:
-        await update.message.reply_text("❌ اطلاعات ناقص است. ۵ قسمت (شرکت، رابط، تلفن، علاقه‌مندی، وضعیت) با علامت | باید جدا شوند.")
+    welcome_text = (
+        "سلام مدیر عزیز! 🌟\n"
+        "به پنل مدیریت هوشمند شرکت بازرگانی **مانا** خوش آمدید.\n\n"
+        "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.message.edit_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+# --- مدیریت کلیک دکمه‌ها ---
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    await query.answer()
+
+    client = get_gsheet_client()
+    if not client:
+        await query.message.reply_text("❌ خطا در اتصال به گوگل‌شیت.")
+        return
+
+    if data == "menu_add_customer":
+        context.user_data['state'] = 'WAITING_FOR_CUSTOMER_DATA'
+        await query.message.reply_text(
+            "📝 لطفاً اطلاعات مشتری جدید را به شکل زیر (با استفاده از علامت |) ارسال کنید:\n\n"
+            "`نام شرکت | شخص رابط | تلفن | علاقه‌مندی‌ها | وضعیت`\n\n"
+            "*(مثال: پتروآریا | آقای رضایی | 09123456789 | خرید استون | فعال)*",
+            parse_mode="Markdown"
+        )
+
+    elif data == "menu_add_product":
+        context.user_data['state'] = 'WAITING_FOR_PRODUCT_DATA'
+        await query.message.reply_text(
+            "📦 لطفاً اطلاعات محصول جدید را به شکل زیر ارسال کنید:\n\n"
+            "`نام محصول | شماره بچ (Batch) | تاریخ انقضا | موجودی | لینک COA`\n\n"
+            "*(مثال: متانول پتروشیمی | B-402 | 1406/05 | 25 تن | http://...)*",
+            parse_mode="Markdown"
+        )
+
+    elif data == "menu_add_logistics":
+        context.user_data['state'] = 'WAITING_FOR_LOGISTICS_DATA'
+        await query.message.reply_text(
+            "🚚 لطفاً اطلاعات حمل و نقل را به شکل زیر ارسال کنید:\n\n"
+            "`شماره سفارش | مشتری | محصول | تاریخ بارگیری | تاریخ تخلیه | پلاک کامیون | تلفن راننده`",
+            parse_mode="Markdown"
+        )
+
+    elif data == "menu_list_customers":
+        try:
+            sheet = client.open(SHEET_NAME).worksheet("Customers")
+            records = sheet.get_all_records()
+            if not records:
+                await query.message.reply_text("📭 هیچ مشتری‌ای تاکنون ثبت نشده است.")
+            else:
+                msg = "📋 **لیست مشتریان ثبت شده:**\n\n"
+                for r in records[-10:]: # نمایش ۱۰ مشتری آخر
+                    msg += f"🆔 شناسه: `{r.get('Customer_ID')}`\n🏢 شرکت: {r.get('Company_Name')}\n👤 رابط: {r.get('Contact_Person')}\n📞 تلفن: {r.get('Phone')}\n📌 وضعیت: {r.get('Status')}\n-------------------\n"
+                await query.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطا در خواندن اطلاعات: {e}")
+        
+        # بازگشت به منو
+        await show_back_menu(query.message)
+
+    elif data == "menu_followups":
+        await query.message.reply_text("📊 بخش جدول پیگیری‌ها و وضعیت قیف فروش در حال توسعه است. به‌زودی فعال می‌شود.")
+        await show_back_menu(query.message)
+
+    elif data in ["menu_edit_del_customer", "menu_edit_del_product", "menu_edit_del_logistics"]:
+        target = "Customers" if "customer" in data else ("Products" if "product" in data else "Logistics")
+        context.user_data['state'] = f'WAITING_FOR_EDIT_DEL_{target.upper()}'
+        await query.message.reply_text(
+            f"✏️🗑️ برای ویرایش یا حذف در بخش **{target}**، لطفاً به یکی از دو روش زیر عمل کنید:\n\n"
+            "1️⃣ **حذف:** دستور `/delete_{target.lower()[:-1]} [شناسه]`\n"
+            "2️⃣ **ویرایش:** دستور `/edit_{target.lower()[:-1]} [شناسه] | [نام ستون] | [مقدار جدید]`\n\n"
+            "*(مثال حذف: `/delete_customer CUST-0512`)*",
+            parse_mode="Markdown"
+        )
+
+async def show_back_menu(message):
+    keyboard = [[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]]
+    await message.reply_text("برای بازگشت به منو کلیک کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# --- پردازش پیام‌های متنی ارسالی کاربران بر اساس وضعیت ---
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data.get('state')
+    text = update.message.text
+    
+    if not state:
+        await update.message.reply_text("لطفاً از طریق دستور /start منوی مدیریت را باز کنید.")
         return
 
     client = get_gsheet_client()
@@ -66,104 +167,89 @@ async def add_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        sheet = client.open(SHEET_NAME).worksheet("Customers")
-        # تولید Customer_ID خودکار بر اساس تاریخ و زمان
-        cust_id = "CUST-" + datetime.datetime.now().strftime("%m%d%H%M")
-        
-        row_data = [cust_id, parts[0], parts[1], parts[2], parts[3], parts[4]]
-        sheet.append_row(row_data)
-        
-        await update.message.reply_text(f"✅ مشتری جدید با موفقیت ثبت شد!\nشناسه مشتری: `{cust_id}`", parse_mode="Markdown")
+        if state == 'WAITING_FOR_CUSTOMER_DATA':
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 5:
+                await update.message.reply_text("❌ اطلاعات ناقص است. ۵ قسمت با علامت | جدا شوند.")
+                return
+            sheet = client.open(SHEET_NAME).worksheet("Customers")
+            cust_id = "CUST-" + datetime.datetime.now().strftime("%m%d%H%M")
+            sheet.append_row([cust_id, parts[0], parts[1], parts[2], parts[3], parts[4]])
+            await update.message.reply_text(f"✅ مشتری جدید با موفقیت ثبت شد!\nشناسه: `{cust_id}`", parse_mode="Markdown")
+            context.user_data['state'] = None
+
+        elif state == 'WAITING_FOR_PRODUCT_DATA':
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 5:
+                await update.message.reply_text("❌ اطلاعات ناقص است. ۵ قسمت با علامت | جدا شوند.")
+                return
+            sheet = client.open(SHEET_NAME).worksheet("Products")
+            prod_id = "PROD-" + datetime.datetime.now().strftime("%m%d%H%M")
+            sheet.append_row([prod_id, parts[0], parts[1], parts[2], parts[3], parts[4]])
+            await update.message.reply_text(f"✅ محصول جدید با موفقیت ثبت شد!\nشناسه: `{prod_id}`", parse_mode="Markdown")
+            context.user_data['state'] = None
+
+        elif state == 'WAITING_FOR_LOGISTICS_DATA':
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 6:
+                await update.message.reply_text("❌ اطلاعات لجستیک باید حداقل شامل ۶ قسمت باشد.")
+                return
+            sheet = client.open(SHEET_NAME).worksheet("Logistics")
+            order_id = "ORD-" + datetime.datetime.now().strftime("%m%d%H%M")
+            row = [order_id] + parts
+            sheet.append_row(row)
+            await update.message.reply_text(f"✅ اطلاعات حمل و نقل با موفقیت ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
+            context.user_data['state'] = None
+
     except Exception as e:
-        logger.error(f"Error adding customer: {e}")
+        logger.error(f"Error processing input: {e}")
         await update.message.reply_text(f"❌ خطا در ثبت اطلاعات: {e}")
+        context.user_data['state'] = None
 
-async def delete_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فرمت دستور: /delete_customer CUST-102
+# --- دستورات مستقیم ویرایش و حذف ---
+async def delete_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # تشخیص اینکه چه دستوری فراخوانی شده (delete_customer یا delete_product یا delete_logistics)
+    command = update.message.text.split()[0].replace("/", "")
     if not context.args:
-        await update.message.reply_text("❌ لطفاً شناسه مشتری را وارد کنید:\n`/delete_customer CUST-XXXX`", parse_mode="Markdown")
+        await update.message.reply_text("❌ لطفاً شناسه مورد نظر را وارد کنید.")
         return
     
-    cust_id = context.args[0].strip()
+    record_id = context.args[0].strip()
     client = get_gsheet_client()
     if not client:
         await update.message.reply_text("❌ خطا در اتصال به گوگل‌شیت.")
         return
 
+    sheet_map = {
+        "delete_customer": ("Customers", "Customer_ID"),
+        "delete_product": ("Products", "Product_ID"),
+        "delete_logistics": ("Logistics", "Order_ID")
+    }
+    
+    sheet_name, _ = sheet_map.get(command, ("Customers", "Customer_ID"))
     try:
-        sheet = client.open(SHEET_NAME).worksheet("Customers")
-        cell = sheet.find(cust_id)
+        sheet = client.open(SHEET_NAME).worksheet(sheet_name)
+        cell = sheet.find(record_id)
         if cell:
             sheet.delete_rows(cell.row)
-            await update.message.reply_text(f"🗑️ مشتری با شناسه `{cust_id}` با موفقیت حذف شد.", parse_mode="Markdown")
+            await update.message.reply_text(f"🗑️ رکورد با شناسه `{record_id}` با موفقیت حذف شد.", parse_mode="Markdown")
         else:
-            await update.message.reply_text(f"⚠️ مشتری با شناسه `{cust_id}` یافت نشد.")
+            await update.message.reply_text(f"⚠️ رکوردی با شناسه `{record_id}` یافت نشد.")
     except Exception as e:
-        logger.error(f"Error deleting customer: {e}")
-        await update.message.reply_text(f"❌ خطا در حذف اطلاعات: {e}")
+        await update.message.reply_text(f"❌ خطا در حذف: {e}")
 
-async def edit_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فرمت دستور: /edit_customer CUST-102 | ستون (مثلا Phone) | مقدار جدید
-    text = " ".join(context.args)
-    parts = [p.strip() for p in text.split("|")]
-    if len(parts) < 3:
-        await update.message.reply_text("❌ فرمت اشتباه است. نمونه:\n`/edit_customer CUST-102 | Phone | 09120000000`", parse_mode="Markdown")
-        return
-
-    cust_id, col_name, new_value = parts[0], parts[1], parts[2]
-    client = get_gsheet_client()
-    if not client:
-        await update.message.reply_text("❌ خطا در اتصال به گوگل‌شیت.")
-        return
-
-    try:
-        sheet = client.open(SHEET_NAME).worksheet("Customers")
-        cell = sheet.find(cust_id)
-        if not cell:
-            await update.message.reply_text(f"⚠️ مشتری با شناسه `{cust_id}` یافت نشد.")
-            return
-
-        # پیدا کردن شماره ستون بر اساس نام هدر در ردیف اول
-        header_row = sheet.row_values(1)
-        if col_name not in header_row:
-            await update.message.reply_text(f"⚠️ نام ستون `{col_name}` معتبر نیست. ستون‌های موجود: {header_row}")
-            return
-        
-        col_index = header_row.index(col_name) + 1
-        sheet.update_cell(cell.row, col_index, new_value)
-        await update.message.reply_text(f"✏️ اطلاعات مشتری `{cust_id}` (ستون {col_name}) با موفقیت به `{new_value}` ویرایش شد.", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Error editing customer: {e}")
-        await update.message.reply_text(f"❌ خطا در ویرایش اطلاعات: {e}")
-
-# مدیریت پیام‌های متنی عادی
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    user_name = update.message.from_user.first_name
-    
-    client = get_gsheet_client()
-    db_status = "متصل به گوگل‌شیت ✅" if client else "خطا در اتصال به گوگل‌شیت ❌"
-
-    response = (
-        f"سلام {user_name} عزیز!\n"
-        f"وضعیت دیتابیس مانا: {db_status}\n\n"
-        f"برای ثبت مشتری جدید از دستور زیر استفاده کنید:\n"
-        f"`/add_customer نام شرکت | شخص رابط | تلفن | علاقه‌مندی‌ها | وضعیت`"
-    )
-    await update.message.reply_text(response, parse_mode="Markdown")
-
-def main_bot():
+async def main_bot():
     application = ApplicationBuilder().token(TOKEN).build()
     
-    # ثبت دستورات
-    application.add_handler(CommandHandler("add_customer", add_customer))
-    application.add_handler(CommandHandler("delete_customer", delete_customer))
-    application.add_handler(CommandHandler("edit_customer", edit_customer))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(start, pattern="^back_to_main$"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^menu_"))
     
-    # ثبت هندلر پیام‌های متنی عادی
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    application.add_handler(CommandHandler(["delete_customer", "delete_product", "delete_logistics"], delete_record))
     
-    logger.info("Bot started polling with CRM commands...")
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_input))
+    
+    logger.info("Interactive Menu Bot started...")
     application.run_polling()
 
 if __name__ == '__main__':
