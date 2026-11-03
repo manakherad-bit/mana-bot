@@ -88,20 +88,20 @@ def webhook():
         logger.error(f"خطا در پردازش وب‌هوک: {e}")
         return "Error", 500
 
-# --- منوی اصلی ربات با چیدمان جدید ---
+# --- منوی اصلی ربات با جابجایی ستون‌ها (ویرایش/حذف در راست، ثبت در چپ) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
-            InlineKeyboardButton("➕ ثبت محصول جدید", callback_data="menu_add_product"),
-            InlineKeyboardButton("✏️🗑️ ویرایش/حذف محصول", callback_data="menu_edit_del_product")
+            InlineKeyboardButton("✏️🗑️ ویرایش/حذف محصول", callback_data="menu_edit_del_product"),
+            InlineKeyboardButton("➕ ثبت محصول جدید", callback_data="menu_add_product")
         ],
         [
-            InlineKeyboardButton("➕ ثبت مشتری جدید", callback_data="menu_add_customer"),
-            InlineKeyboardButton("✏️🗑️ ویرایش/حذف مشتری", callback_data="menu_edit_del_customer")
+            InlineKeyboardButton("✏️🗑️ ویرایش/حذف مشتری", callback_data="menu_edit_del_customer"),
+            InlineKeyboardButton("➕ ثبت مشتری جدید", callback_data="menu_add_customer")
         ],
         [
-            InlineKeyboardButton("➕ ثبت حمل جدید", callback_data="menu_add_logistics"),
-            InlineKeyboardButton("✏️🗑️ ویرایش/حذف لجستیک", callback_data="menu_edit_del_logistics")
+            InlineKeyboardButton("✏️🗑️ ویرایش/حذف لجستیک", callback_data="menu_edit_del_logistics"),
+            InlineKeyboardButton("➕ ثبت حمل جدید", callback_data="menu_add_logistics")
         ],
         [
             InlineKeyboardButton("📊 جدول پیگیری‌ها", callback_data="menu_followups"),
@@ -141,7 +141,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "تاریخ انقضا\n"
             "موجودی\n"
             "لینک COA\n\n"
-            "*(مثال: استون | BATCH123 | 2027/05 | 1000 | http://...)*",
+            "*(مثال: استون\nBATCH123\n2027/05\n1000\nhttp://...)*",
             parse_mode="Markdown"
         )
     elif data == "menu_add_customer":
@@ -185,13 +185,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_followups":
         await query.message.reply_text("📊 جدول پیگیری‌ها به‌زودی فعال می‌شود.")
         await show_back_menu(query.message)
-    elif data in ["menu_edit_del_customer", "menu_edit_del_product", "menu_edit_del_logistics"]:
-        target = "مشتریان" if "customer" in data else ("محصولات" if "product" in data else "لجستیک")
-        await query.message.reply_text(
-            f"✏️🗑️ برای ویرایش یا حذف در بخش **{target}**، دستور مربوطه را ارسال کنید:\n"
-            "حذف: `/delete_record شناسه`\nویرایش: `/edit_record شناسه | ستون | مقدار جدید`",
-            parse_mode="Markdown"
-        )
+        
+    elif data in ["menu_edit_del_product", "menu_edit_del_customer", "menu_edit_del_logistics"]:
+        target_ws = "Products" if "product" in data else ("Customers" if "customer" in data else "Logistics")
+        target_name = "محصولات" if "product" in data else ("مشتریان" if "customer" in data else "لجستیک")
+        
+        try:
+            sheet = client.open(SHEET_NAME).worksheet(target_ws)
+            records = sheet.get_all_records()
+            if not records:
+                await query.message.reply_text(f"📭 هیچ موردی در بخش {target_name} ثبت نشده است.")
+                return
+            
+            msg = f"✏️🗑️ **لیست {target_name} برای ویرایش یا حذف:**\nلطفاً شناسه مورد نظر را کپی کرده یا یادداشت کنید:\n\n"
+            for i, r in enumerate(records[-10:], 1):
+                # پیدا کردن اولین کلید به عنوان شناسه
+                keys = list(r.keys())
+                rec_id = r.get(keys[0], f"Row-{i}")
+                name_val = r.get(keys[1], "")
+                msg += f"{i}. شناسه: `{rec_id}` | عنوان: {name_val}\n"
+                
+            msg += "\nلطفاً **شناسه** رکورد مورد نظر به همراه عملیات (حذف یا ویرایش) را به شکل زیر بفرستید:\n\n"
+            msg += "`شناسه | حذف` (برای حذف)\nیا\n`شناسه | ویرایش` (برای ویرایش)"
+            
+            context.user_data['state'] = f'WAITING_FOR_ACTION_SELECTION_{target_ws}'
+            await query.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطا در دریافت اطلاعات: {e}")
 
 async def show_back_menu(message):
     keyboard = [[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]]
@@ -210,17 +230,66 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # تفکیک خط‌به‌خط ورودی‌های کاربر (جایگزین علامت |)
+        # مدیریت حالت انتخاب ویرایش یا حذف
+        if state.startswith('WAITING_FOR_ACTION_SELECTION_'):
+            target_ws = state.replace('WAITING_FOR_ACTION_SELECTION_', '')
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 2:
+                await update.message.reply_text("❌ فرمت اشتباه است. لطفاً به صورت `شناسه | حذف` یا `شناسه | ویرایش` ارسال کنید.", parse_mode="Markdown")
+                return
+            
+            rec_id = parts[0]
+            action = parts[1]
+            
+            sheet = client.open(SHEET_NAME).worksheet(target_ws)
+            cell = sheet.find(rec_id)
+            if not cell:
+                await update.message.reply_text(f"❌ رکوردی با شناسه `{rec_id}` یافت نشد.", parse_mode="Markdown")
+                context.user_data['state'] = None
+                return
+                
+            row_idx = cell.row
+            
+            if "حذف" in action:
+                sheet.delete_rows(row_idx)
+                await update.message.reply_text(f"✅ رکورد با شناسه `{rec_id}` با موفقیت حذف شد.", parse_mode="Markdown")
+                context.user_data['state'] = None
+            elif "ویرایش" in action:
+                context.user_data['edit_sheet'] = target_ws
+                context.user_data['edit_row'] = row_idx
+                context.user_data['edit_id'] = rec_id
+                
+                if target_ws == "Products":
+                    context.user_data['state'] = 'WAITING_FOR_EDIT_PRODUCT_DATA'
+                    await update.message.reply_text(
+                        f"📦 در حال ویرایش محصول `{rec_id}`.\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
+                        "نام محصول\nشماره بچ\nتاریخ انقضا\nموجودی\nلینک COA", parse_mode="Markdown"
+                    )
+                elif target_ws == "Customers":
+                    context.user_data['state'] = 'WAITING_FOR_EDIT_CUSTOMER_DATA'
+                    await update.message.reply_text(
+                        f"📝 در حال ویرایش مشتری `{rec_id}`.\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
+                        "نام شرکت\nشخص رابط\nتلفن\nعلاقه‌مندی‌ها\nوضعیت", parse_mode="Markdown"
+                    )
+                elif target_ws == "Logistics":
+                    context.user_data['state'] = 'WAITING_FOR_EDIT_LOGISTICS_DATA'
+                    await update.message.reply_text(
+                        f"🚚 در حال ویرایش لجستیک `{rec_id}`.\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
+                        "مشتری\nمحصول\nتاریخ بارگیری\nتاریخ تخلیه\nپلاک کامیون\nتلفن راننده", parse_mode="Markdown"
+                    )
+            return
+
+        # تفکیک خط‌به‌خط ورودی‌های کاربر
         lines = [line.strip() for line in text.split("\n") if line.strip()]
 
         if state == 'WAITING_FOR_PRODUCT_DATA':
             if len(lines) < 5:
-                await query.message.reply_text("❌ اطلاعات ناقص است. لطفاً هر ۵ مورد را در خطوط جداگانه وارد کنید.") if 'query' in locals() else await update.message.reply_text("❌ اطلاعات ناقص است. لطفاً هر ۵ مورد را در خطوط جداگانه وارد کنید.")
+                await update.message.reply_text("❌ اطلاعات ناقص است. لطفاً هر ۵ مورد را در خطوط جداگانه وارد کنید.")
                 return
             sheet = client.open(SHEET_NAME).worksheet("Products")
             prod_id = "PROD-" + datetime.datetime.now().strftime("%m%d%H%M")
             sheet.append_row([prod_id, lines[0], lines[1], lines[2], lines[3], lines[4]])
-            await update.message.reply_text(f"✅ محصول جدید با موفقیت در بخش محصولات ثبت شد!\nشناسه: `{prod_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ محصول جدید با موفقیت ثبت شد!\nشناسه: `{prod_id}`", parse_mode="Markdown")
             context.user_data['state'] = None
             
         elif state == 'WAITING_FOR_CUSTOMER_DATA':
@@ -230,7 +299,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sheet = client.open(SHEET_NAME).worksheet("Customers")
             cust_id = "CUST-" + datetime.datetime.now().strftime("%m%d%H%M")
             sheet.append_row([cust_id, lines[0], lines[1], lines[2], lines[3], lines[4]])
-            await update.message.reply_text(f"✅ مشتری جدید با موفقیت در بخش مشتریان ثبت شد!\nشناسه: `{cust_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ مشتری جدید با موفقیت ثبت شد!\nشناسه: `{cust_id}`", parse_mode="Markdown")
             context.user_data['state'] = None
             
         elif state == 'WAITING_FOR_LOGISTICS_DATA':
@@ -240,12 +309,31 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sheet = client.open(SHEET_NAME).worksheet("Logistics")
             order_id = "ORD-" + datetime.datetime.now().strftime("%m%d%H%M")
             sheet.append_row([order_id, lines[0], lines[1], lines[2], lines[3], lines[4], lines[5]])
-            await update.message.reply_text(f"✅ حمل جدید با موفقیت در بخش لجستیک ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ حمل جدید با موفقیت ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
+            context.user_data['state'] = None
+
+        # حالت جایگزینی اطلاعات ویرایش شده
+        elif state in ['WAITING_FOR_EDIT_PRODUCT_DATA', 'WAITING_FOR_EDIT_CUSTOMER_DATA', 'WAITING_FOR_EDIT_LOGISTICS_DATA']:
+            target_ws = context.user_data.get('edit_sheet')
+            row_idx = context.user_data.get('edit_row')
+            rec_id = context.user_data.get('edit_id')
+            
+            expected_count = 6 if target_ws == "Logistics" else 5
+            if len(lines) < expected_count:
+                await update.message.reply_text(f"❌ اطلاعات ناقص است. لطفاً تمام {expected_count} مورد را در خطوط جداگانه وارد کنید.")
+                return
+                
+            sheet = client.open(SHEET_NAME).worksheet(target_ws)
+            new_row_data = [rec_id] + lines
+            
+            # جایگزینی سلول‌های ردیف مربوطه
+            sheet.update(f"A{row_idx}:F{row_idx}" if expected_count == 5 else f"A{row_idx}:G{row_idx}", [new_row_data])
+            await update.message.reply_text(f"✅ اطلاعات رکورد `{rec_id}` با موفقیت ویرایش و به‌روزرسانی شد!", parse_mode="Markdown")
             context.user_data['state'] = None
             
     except Exception as e:
-        logger.error(f"خطا در ثبت اطلاعات: {e}")
-        await update.message.reply_text(f"❌ خطا در ثبت اطلاعات: {e}")
+        logger.error(f"خطا در ثبت یا ویرایش اطلاعات: {e}")
+        await update.message.reply_text(f"❌ خطا: {e}")
         context.user_data['state'] = None
 
 # تنظیم هندلرها
