@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import asyncio
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,8 +22,6 @@ logger = logging.getLogger(__name__)
 TOKEN = "9057310870:AAFfuH_q1F7wFmNN4_jumMup2DEB0rp2-lY"
 SHEET_NAME = "Mana_Database"
 
-# دریافت نام دامنه رندر از متغیرهای محیطی یا تنظیم دستی
-# رندر به طور خودکان Render URL را ست می‌کند یا خودتون آدرس وب‌سرویس رندر رو اینجا بذارید
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 def get_gsheet_client():
@@ -53,16 +52,20 @@ def home():
     status = "Connected to Google Sheets successfully!" if client else "Failed to connect to Google Sheets!"
     return f"Mana Bot Webhook is running! | DB Status: {status}"
 
-# نقطه دریافت آپدیت‌ها از تلگرام (Webhook Endpoint)
+# نقطه دریافت آپدیت‌ها از تلگرام (Webhook Endpoint) با اصلاح مقداردهی اولیه
 @web_app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
     try:
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # اجرای ناهمگام آپدیت در حلقه رویداد تلگرام
-        import asyncio
-        asyncio.run(application.process_update(update))
+        async def process():
+            # اصلاح کلیدی: بررسی و مقداردهی اولیه اپلیکیشن پیش از پردازش آپدیت
+            if not application.initialized:
+                await application.initialize()
+            await application.process_update(update)
+
+        asyncio.run(process())
         return "OK", 200
     except Exception as e:
         logger.error(f"Error processing webhook update: {e}")
@@ -210,7 +213,6 @@ application.add_handler(CallbackQueryHandler(button_handler, pattern="^menu_"))
 application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_input))
 
 if __name__ == '__main__':
-    # تنظیم وب‌هوک تلگرام به محض استارت اپلیکیشن
     import requests
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{TOKEN}"
