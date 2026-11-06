@@ -1,5 +1,6 @@
-python-telegram-bot
-nest_asyncio
-Flask
-gspread
-google-auth
+   flask
+   python-telegram-bot
+   gspread
+   google-auth
+   requests
+   gunicorn
