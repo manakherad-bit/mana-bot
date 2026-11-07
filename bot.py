@@ -47,9 +47,7 @@ def get_gsheet_client():
         return None
 
 web_app = Flask(__name__)
-
 application = ApplicationBuilder().token(TOKEN).build()
-
 telegram_loop = None
 
 def run_telegram_background_loop():
@@ -60,10 +58,9 @@ def run_telegram_background_loop():
     async def init_bot():
         await application.initialize()
         await application.start()
-        logger.info("ربات تلگرام با موفقیت راه‌اندازی و مقداردهی شد.")
+        logger.info("ربات تلگرام با موفقیت راه‌اندازی شد.")
 
     telegram_loop.run_until_complete(init_bot())
-    
     try:
         telegram_loop.run_forever()
     except Exception as e:
@@ -80,21 +77,17 @@ def webhook():
     try:
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
-        
         if telegram_loop and telegram_loop.is_running():
             asyncio.run_coroutine_threadsafe(application.process_update(update), telegram_loop)
         else:
-            logger.error("حلقه رویداد تلگرام در حال اجرا نیست!")
             return "Error", 500
-            
         return "OK", 200
     except Exception as e:
         logger.error(f"خطا در پردازش وب‌هوک: {e}")
         return "Error", 500
 
-# --- شروع و بررسی احراز هویت ---
+# --- احراز هویت ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # بررسی اینکه آیا کاربر قبلاً لاگین کرده است یا خیر
     if not context.user_data.get('authenticated', False):
         context.user_data['state'] = 'WAITING_FOR_USERNAME'
         text = f"🔐 به **{BOT_USERNAME}** خوش آمدید.\nلطفاً **نام کاربری** خود را وارد کنید:"
@@ -118,19 +111,26 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("➕ ثبت مشتری جدید", callback_data="menu_add_customer")
         ],
         [
+            InlineKeyboardButton("🎯 تفکیک مشتریان (بالقوه/بالفعل)", callback_data="menu_customer_categories")
+        ],
+        [
             InlineKeyboardButton("✏️🗑️ ویرایش/حذف لجستیک", callback_data="menu_edit_del_logistics"),
             InlineKeyboardButton("➕ ثبت حمل جدید", callback_data="menu_add_logistics")
         ],
         [
-            InlineKeyboardButton("📊 جدول پیگیری‌ها", callback_data="menu_followups"),
-            InlineKeyboardButton("📋 نمایش مشتریان", callback_data="menu_list_customers")
+            InlineKeyboardButton("🔔 ثبت پیگیری / یادآوری", callback_data="menu_add_followup"),
+            InlineKeyboardButton("📊 لیست پیگیری‌ها", callback_data="menu_list_followups")
+        ],
+        [
+            InlineKeyboardButton("💰 ثبت تراکنش مالی", callback_data="menu_add_finance"),
+            InlineKeyboardButton("📈 گزارش مالی", callback_data="menu_list_finance")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     welcome_text = (
         "سلام مدیر عزیز! 🌟\n"
-        f"به پنل مدیریت هوشمند **{BOT_USERNAME}** خوش آمدید.\n\n"
+        f"به پنل مدیریت هوشمند بازرگانی **{BOT_USERNAME}** خوش آمدید.\n\n"
         "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
     )
     
@@ -141,7 +141,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # اگر کاربر لاگین نکرده باشد، اجازه دسترسی به دکمه‌ها داده نمی‌شود
     if not context.user_data.get('authenticated', False):
         await update.callback_query.answer("لطفاً ابتدا با دستور /start وارد شوید.", show_alert=True)
         return
@@ -158,80 +157,104 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_add_product":
         context.user_data['state'] = 'WAITING_FOR_PRODUCT_DATA'
         await query.message.reply_text(
-            "📦 لطفاً اطلاعات محصول جدید را به‌صورت خط‌به‌خط (هر مورد در یک خط با زدن Enter) ارسال کنید:\n\n"
-            "نام محصول\n"
-            "شماره بچ (Batch)\n"
-            "تاریخ انقضا\n"
-            "موجودی\n"
-            "لینک COA",
+            "📦 اطلاعات محصول جدید را خط‌به‌خط وارد کنید:\n\nنام محصول\nشماره بچ\nتاریخ انقضا\nموجودی\nلینک COA",
             parse_mode="Markdown"
         )
     elif data == "menu_add_customer":
         context.user_data['state'] = 'WAITING_FOR_CUSTOMER_DATA'
         await query.message.reply_text(
-            "📝 لطفاً اطلاعات مشتری جدید را به‌صورت خط‌به‌خط (هر مورد در یک خط با زدن Enter) ارسال کنید:\n\n"
-            "نام شرکت\n"
-            "شخص رابط\n"
-            "تلفن\n"
-            "علاقه‌مندی‌ها\n"
-            "وضعیت",
+            "📝 اطلاعات مشتری جدید را خط‌به‌خط وارد کنید:\n\nنام شرکت\nشخص رابط\nتلفن\nعلاقه‌مندی‌ها\nوضعیت (بالقوه / بالفعل)",
             parse_mode="Markdown"
         )
-    elif data == "menu_add_logistics":
-        context.user_data['state'] = 'WAITING_FOR_LOGISTICS_DATA'
-        await query.message.reply_text(
-            "🚚 لطفاً اطلاعات حمل و نقل را به‌صورت خط‌به‌خط (هر مورد در یک خط با زدن Enter) ارسال کنید:\n\n"
-            "مشتری\n"
-            "محصول\n"
-            "تاریخ بارگیری\n"
-            "تاریخ تخلیه\n"
-            "پلاک کامیون\n"
-            "تلفن راننده",
-            parse_mode="Markdown"
-        )
-    elif data == "menu_list_customers":
+    elif data == "menu_customer_categories":
         try:
             sheet = client.open(SHEET_NAME).worksheet("Customers")
             records = sheet.get_all_records()
+            prospects = [r for r in records if "بالقوه" in str(r.get("Status", ""))]
+            active = [r for r in records if "بالفعل" in str(r.get("Status", "")) or "فعال" in str(r.get("Status", ""))]
+            
+            msg = f"👥 **دسته‌بندی مشتریان مانا:**\n\n"
+            msg += f"🎯 **مشتریان بالقوه (لیدها):** {len(prospects)} شرکت\n"
+            for p in prospects[-5:]:
+                msg.s += f"- {p.get('Company_Name')} ({p.get('Contact_Person')})\n"
+            
+            msg += f"\n⭐ **مشتریان بالفعل (فعال/خریدکرده):** {len(active)} شرکت\n"
+            for a in active[-5:]:
+                msg += f"- {a.get('Company_Name')} ({p.get('Contact_Person')})\n"
+                
+            await query.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطا در دسته‌بندی مشتریان: {e}")
+        await show_back_menu(query.message)
+
+    elif data == "menu_add_followup":
+        context.user_data['state'] = 'WAITING_FOR_FOLLOWUP_DATA'
+        await query.message.reply_text(
+            "🔔 اطلاعات پیگیری/یادآوری را خط‌به‌خط وارد کنید:\n\nنام مشتری/شرکت\nموضوع پیگیری (مثلاً: تست نمونه سوربیتول)\nتاریخ پیگیری (مثلاً: 1405/08/20)\nتوضیحات و نتیجه",
+            parse_mode="Markdown"
+        )
+    elif data == "menu_list_followups":
+        try:
+            sheet = client.open(SHEET_NAME).worksheet("FollowUps")
+            records = sheet.get_all_records()
             if not records:
-                await query.message.reply_text("📭 هیچ مشتری‌ای در بخش مشتریان ثبت نشده است.")
+                await query.message.reply_text("📭 هیچ پیگیری یا یادآوری ثبت نشده است.")
             else:
-                msg = "📋 **لیست مشتریان ثبت شده:**\n\n"
+                msg = "📊 **لیست پیگیری‌ها و یادآوری‌ها:**\n\n"
                 for r in records[-10:]:
-                    msg += f"🆔 شناسه: `{r.get('Customer_ID')}`\n🏢 شرکت: {r.get('Company_Name')}\n👤 رابط: {r.get('Contact_Person')}\n📞 تلفن: {r.get('Phone')}\n📌 وضعیت: {r.get('Status')}\n-------------------\n"
+                    msg += f"🏢 مشتری: {r.get('Customer')}\n📌 موضوع: {r.get('Topic')}\n📅 تاریخ: {r.get('Date')}\n💬 توضیحات: {r.get('Notes')}\n-------------------\n"
                 await query.message.reply_text(msg, parse_mode="Markdown")
         except Exception as e:
-            await query.message.reply_text(f"❌ خطا در خواندن اطلاعات مشتریان: {e}")
+            await query.message.reply_text(f"❌ خطا در خواندن پیگیری‌ها (شاید شیت FollowUps ساخته نشده باشد): {e}")
         await show_back_menu(query.message)
-    elif data == "menu_followups":
-        await query.message.reply_text("📊 جدول پیگیری‌ها به‌زودی فعال می‌شود.")
+
+    elif data == "menu_add_finance":
+        context.user_data['state'] = 'WAITING_FOR_FINANCE_DATA'
+        await query.message.reply_text(
+            "💰 اطلاعات تراکنش مالی را خط‌به‌خط وارد کنید:\n\nمشتری/فروشنده\nنوع تراکنش (فروش / خرید / هزینه)\nمبلغ (تومان)\nوضعیت تسویه (تسویه شده / چک / نسیه)",
+            parse_mode="Markdown"
+        )
+    elif data == "menu_list_finance":
+        try:
+            sheet = client.open(SHEET_NAME).worksheet("Financial")
+            records = sheet.get_all_records()
+            if not records:
+                await query.message.reply_text("📭 هیچ تراکنش مالی ثبت نشده است.")
+            else:
+                msg = "📈 **گزارش تراکنش‌های مالی:**\n\n"
+                for r in records[-10:]:
+                    msg += f"🏢 طرف حساب: {r.get('Party')}\n🏷 نوع: {r.get('Type')}\n💵 مبلغ: {r.get('Amount')}\n📌 وضعیت: {r.get('Status')}\n-------------------\n"
+                await query.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await query.message.reply_text(f"❌ خطا در خواندن اطلاعات مالی (شاید شیت Financial ساخته نشده باشد): {e}")
         await show_back_menu(query.message)
-        
+
+    elif data == "menu_add_logistics":
+        context.user_data['state'] = 'WAITING_FOR_LOGISTICS_DATA'
+        await query.message.reply_text(
+            "🚚 اطلاعات حمل را خط‌به‌خط وارد کنید:\n\nمشتری\nمحصول\nتاریخ بارگیری\nتاریخ تخلیه\nپلاک کامیون\nتلفن راننده",
+            parse_mode="Markdown"
+        )
     elif data in ["menu_edit_del_product", "menu_edit_del_customer", "menu_edit_del_logistics"]:
         target_ws = "Products" if "product" in data else ("Customers" if "customer" in data else "Logistics")
         target_name = "محصولات" if "product" in data else ("مشتریان" if "customer" in data else "لجستیک")
-        
         try:
             sheet = client.open(SHEET_NAME).worksheet(target_ws)
             records = sheet.get_all_records()
             if not records:
-                await query.message.reply_text(f"📭 هیچ موردی در بخش {target_name} ثبت نشده است.")
+                await query.message.reply_text(f"📭 موردی در {target_name} نیست.")
                 return
-            
             context.user_data['cached_records'] = records
             context.user_data['target_ws'] = target_ws
-            
-            msg = f"✏️🗑️ **لیست {target_name}:**\nبرای حذف یا ویرایش، دستور خود را به یکی از شکل‌های زیر بفرستید:\n(مثال: `حذف 2` یا `ویرایش 1`)\n\n"
-            
+            msg = f"✏️🗑️ **لیست {target_name}:**\nدستور را به شکل `حذف 2` یا `ویرایش 1` بفرستید:\n\n"
             for i, r in enumerate(records, 1):
                 keys = list(r.keys())
                 main_val = r.get(keys[1], "بدون عنوان") if len(keys) > 1 else "بدون عنوان"
                 msg += f"{i}. {main_val} (شناسه: `{r.get(keys[0])}`)\n"
-                
             context.user_data['state'] = 'WAITING_FOR_INDEX_ACTION'
             await query.message.reply_text(msg, parse_mode="Markdown")
         except Exception as e:
-            await query.message.reply_text(f"❌ خطا در دریافت اطلاعات: {e}")
+            await query.message.reply_text(f"❌ خطا: {e}")
 
 async def show_back_menu(message):
     keyboard = [[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]]
@@ -241,13 +264,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get('state')
     text = update.message.text
     
-    # کنترل مراحل ورود نام کاربری و رمز عبور
     if state == 'WAITING_FOR_USERNAME':
         if text.strip() == BOT_USERNAME:
             context.user_data['state'] = 'WAITING_FOR_PASSWORD'
-            await update.message.reply_text("✅ نام کاربری تایید شد.\nاکنون لطفاً **رمز عبور** خود را وارد کنید:")
+            await update.message.reply_text("✅ نام کاربری تایید شد.\nاکنون **رمز عبور** را وارد کنید:")
         else:
-            await update.message.reply_text("❌ نام کاربری اشتباه است. لطفاً دوباره تلاش کنید یا /start را بفرستید.")
+            await update.message.reply_text("❌ نام کاربری اشتباه است. لطفاً دوباره تلاش کنید.")
         return
 
     if state == 'WAITING_FOR_PASSWORD':
@@ -257,17 +279,16 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ احراز هویت با موفقیت انجام شد!")
             await show_main_menu(update, context)
         else:
-            await update.message.reply_text("❌ رمز عبور اشتباه است. لطفاً دوباره تلاش کنید یا /start را بفرستید.")
+            await update.message.reply_text("❌ رمز عبور اشتباه است.")
             context.user_data['state'] = 'WAITING_FOR_USERNAME'
         return
 
-    # بررسی احراز هویت برای بقیه بخش‌ها
     if not context.user_data.get('authenticated', False):
-        await update.message.reply_text("⛔ لطفاً ابتدا با دستور /start و ورود نام کاربری و رمز عبور وارد شوید.")
+        await update.message.reply_text("⛔ لطفاً ابتدا با دستور /start وارد شوید.")
         return
 
     if not state:
-        await update.message.reply_text("لطفاً ابتدا از دستور /start برای ورود به منو استفاده کنید.")
+        await update.message.reply_text("لطفاً از /start استفاده کنید.")
         return
 
     client = get_gsheet_client()
@@ -276,117 +297,61 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        if state == 'WAITING_FOR_INDEX_ACTION':
-            parts = text.split()
-            if len(parts) < 2:
-                await update.message.reply_text("❌ فرمت اشتباه است. لطفاً به صورت `حذف 2` یا `ویرایش 1` ارسال کنید.", parse_mode="Markdown")
-                return
-            
-            action_word = parts[0]
-            try:
-                idx = int(parts[1]) - 1
-            except ValueError:
-                await update.message.reply_text("❌ شماره ردیف وارد شده معتبر نیست.")
-                return
-                
-            records = context.user_data.get('cached_records', [])
-            target_ws = context.user_data.get('target_ws')
-            
-            if idx < 0 or idx >= len(records):
-                await update.message.reply_text("❌ شماره ردیف وارد شده در لیست وجود ندارد.")
-                return
-                
-            selected_record = records[idx]
-            keys = list(selected_record.keys())
-            rec_id = selected_record.get(keys[0])
-            sheet_row_idx = idx + 2
-            
-            if "حذف" in action_word:
-                sheet = client.open(SHEET_NAME).worksheet(target_ws)
-                sheet.delete_rows(sheet_row_idx)
-                await update.message.reply_text(f"✅ ردیف شماره {idx + 1} با موفقیت حذف شد.", parse_mode="Markdown")
-                context.user_data['state'] = None
-                
-            elif "ویرایش" in action_word:
-                context.user_data['edit_sheet'] = target_ws
-                context.user_data['edit_row'] = sheet_row_idx
-                context.user_data['edit_id'] = rec_id
-                
-                if target_ws == "Products":
-                    context.user_data['state'] = 'WAITING_FOR_EDIT_PRODUCT_DATA'
-                    await update.message.reply_text(
-                        f"📦 در حال ویرایش ردیف {idx + 1} (محصول `{rec_id}`).\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
-                        "نام محصول\nشماره بچ\nتاریخ انقضا\nموجودی\nلینک COA", parse_mode="Markdown"
-                    )
-                elif target_ws == "Customers":
-                    context.user_data['state'] = 'WAITING_FOR_EDIT_CUSTOMER_DATA'
-                    await update.message.reply_text(
-                        f"📝 در حال ویرایش ردیف {idx + 1} (مشتری `{rec_id}`).\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
-                        "نام شرکت\nشخص رابط\nتلفن\nعلاقه‌مندی‌ها\nوضعیت", parse_mode="Markdown"
-                    )
-                elif target_ws == "Logistics":
-                    context.user_data['state'] = 'WAITING_FOR_EDIT_LOGISTICS_DATA'
-                    await update.message.reply_text(
-                        f"🚚 در حال ویرایش ردیف {idx + 1} (لجستیک `{rec_id}`).\nلطفاً اطلاعات جدید را به‌صورت خط‌به‌خط وارد کنید:\n\n"
-                        "مشتری\nمحصول\nتاریخ بارگیری\nتاریخ تخلیه\nپلاک کامیون\nتلفن راننده", parse_mode="Markdown"
-                    )
-            return
-
         lines = [line.strip() for line in text.split("\n") if line.strip()]
 
-        if state == 'WAITING_FOR_PRODUCT_DATA':
-            if len(lines) < 5:
-                await update.message.reply_text("❌ اطلاعات ناقص است. لطفاً هر ۵ مورد را در خطوط جداگانه وارد کنید.")
+        if state == 'WAITING_FOR_FOLLOWUP_DATA':
+            if len(lines) < 4:
+                await update.message.reply_text("❌ اطلاعات پیگیری ناقص است. لطفاً هر ۴ مورد را در خطوط جداگانه وارد کنید.")
                 return
-            sheet = client.open(SHEET_NAME).worksheet("Products")
-            prod_id = "PROD-" + datetime.datetime.now().strftime("%m%d%H%M")
-            sheet.append_row([prod_id, lines[0], lines[1], lines[2], lines[3], lines[4]])
-            await update.message.reply_text(f"✅ محصول جدید با موفقیت ثبت شد!\nشناسه: `{prod_id}`", parse_mode="Markdown")
+            sheet = client.open(SHEET_NAME).worksheet("FollowUps")
+            sheet.append_row([lines[0], lines[1], lines[2], lines[3]])
+            await update.message.reply_text("✅ یادآوری و پیگیری جدید با موفقیت ثبت شد!", parse_mode="Markdown")
             context.user_data['state'] = None
-            
+
+        elif state == 'WAITING_FOR_FINANCE_DATA':
+            if len(lines) < 4:
+                await update.message.reply_text("❌ اطلاعات مالی ناقص است. لطفاً هر ۴ مورد را در خطوط جداگانه وارد کنید.")
+                return
+            sheet = client.open(SHEET_NAME).worksheet("Financial")
+            sheet.append_row([lines[0], lines[1], lines[2], lines[3]])
+            await update.message.reply_text("✅ تراکنش مالی با موفقیت ثبت شد!", parse_mode="Markdown")
+            context.user_data['state'] = None
+
         elif state == 'WAITING_FOR_CUSTOMER_DATA':
             if len(lines) < 5:
-                await update.message.reply_text("❌ اطلاعات ناقص است. لطفاً هر ۵ مورد را در خطوط جداگانه وارد کنید.")
+                await update.message.reply_text("❌ اطلاعات مشتری ناقص است.")
                 return
             sheet = client.open(SHEET_NAME).worksheet("Customers")
             cust_id = "CUST-" + datetime.datetime.now().strftime("%m%d%H%M")
             sheet.append_row([cust_id, lines[0], lines[1], lines[2], lines[3], lines[4]])
-            await update.message.reply_text(f"✅ مشتری جدید با موفقیت ثبت شد!\nشناسه: `{cust_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ مشتری جدید ثبت شد!\nشناسه: `{cust_id}`", parse_mode="Markdown")
             context.user_data['state'] = None
-            
+
+        elif state == 'WAITING_FOR_PRODUCT_DATA':
+            if len(lines) < 5:
+                await update.message.reply_text("❌ اطلاعات محصول ناقص است.")
+                return
+            sheet = client.open(SHEET_NAME).worksheet("Products")
+            prod_id = "PROD-" + datetime.datetime.now().strftime("%m%d%H%M")
+            sheet.append_row([prod_id, lines[0], lines[1], lines[2], lines[3], lines[4]])
+            await update.message.reply_text(f"✅ محصول جدید ثبت شد!\nشناسه: `{prod_id}`", parse_mode="Markdown")
+            context.user_data['state'] = None
+
         elif state == 'WAITING_FOR_LOGISTICS_DATA':
             if len(lines) < 6:
-                await update.message.reply_text("❌ اطلاعات لجستیک ناقص است. لطفاً هر ۶ مورد را در خطوط جداگانه وارد کنید.")
+                await update.message.reply_text("❌ اطلاعات لجستیک ناقص است.")
                 return
             sheet = client.open(SHEET_NAME).worksheet("Logistics")
             order_id = "ORD-" + datetime.datetime.now().strftime("%m%d%H%M")
             sheet.append_row([order_id, lines[0], lines[1], lines[2], lines[3], lines[4], lines[5]])
-            await update.message.reply_text(f"✅ حمل جدید با موفقیت ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ حمل جدید ثبت شد!\nشناسه سفارش: `{order_id}`", parse_mode="Markdown")
             context.user_data['state'] = None
 
-        elif state in ['WAITING_FOR_EDIT_PRODUCT_DATA', 'WAITING_FOR_EDIT_CUSTOMER_DATA', 'WAITING_FOR_EDIT_LOGISTICS_DATA']:
-            target_ws = context.user_data.get('edit_sheet')
-            row_idx = context.user_data.get('edit_row')
-            rec_id = context.user_data.get('edit_id')
-            
-            expected_count = 6 if target_ws == "Logistics" else 5
-            if len(lines) < expected_count:
-                await update.message.reply_text(f"❌ اطلاعات ناقص است. لطفاً تمام {expected_count} مورد را در خطوط جداگانه وارد کنید.")
-                return
-                
-            sheet = client.open(SHEET_NAME).worksheet(target_ws)
-            new_row_data = [rec_id] + lines
-            
-            sheet.update(f"A{row_idx}:F{row_idx}" if expected_count == 5 else f"A{row_idx}:G{row_idx}", [new_row_data])
-            await update.message.reply_text(f"✅ اطلاعات ردیف با موفقیت ویرایش و به‌روزرسانی شد!", parse_mode="Markdown")
-            context.user_data['state'] = None
-            
     except Exception as e:
-        logger.error(f"خطا در ثبت یا ویرایش اطلاعات: {e}")
+        logger.error(f"خطا: {e}")
         await update.message.reply_text(f"❌ خطا: {e}")
         context.user_data['state'] = None
 
-# تنظیم هندلرها
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(start, pattern="^back_to_main$"))
 application.add_handler(CallbackQueryHandler(button_handler, pattern="^menu_"))
@@ -402,9 +367,9 @@ if __name__ == '__main__':
         set_url = f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={webhook_url}"
         try:
             requests.get(set_url)
-            logger.info(f"وب‌هوک با موفقیت روی آدرس تنظیم شد: {webhook_url}")
+            logger.info("وب‌هوک با موفقیت تنظیم شد.")
         except Exception as e:
-            logger.error(f"تنظیم وب‌هوک ناموفق بود: {e}")
+            logger.error(f"خطا در تنظیم وب‌هوک: {e}")
 
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
